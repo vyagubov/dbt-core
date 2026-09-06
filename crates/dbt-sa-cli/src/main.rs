@@ -24,7 +24,8 @@ fn main() -> ExitCode {
             .with_warn_error_options(cli.common_args().get_cli_warn_error_options())
             .with_skip_fusion_only_upgrades(cli.common_args().skip_fusion_only_upgrades())
             .build();
-    let (telemetry_handle, tracing_config_provider) = match trace_config.init() {
+    let tracing_config_provider = trace_config.create_config_provider();
+    let telemetry_handle = match trace_config.init(Arc::clone(&tracing_config_provider)) {
         Ok(handle) => handle,
         Err(e) => {
             let msg = e.to_string();
@@ -38,7 +39,7 @@ fn main() -> ExitCode {
         .with_shutdown_handle(telemetry_handle);
 
     if let Some(resolved_file_log_path) = tracing.config_provider.get_file_log_path() {
-        arg.io.log_path = Some(resolved_file_log_path.to_path_buf());
+        arg.io.log_path = Some(resolved_file_log_path);
     }
 
     let feature_stack: Arc<FeatureStack> = {

@@ -15,7 +15,7 @@ pub mod tracing_feature_handles;
 
 pub use config::{
     FsTraceConfig, FsTraceConfigBuilder, build_file_log_consumer, build_jsonl_file_consumer,
-    build_shared_middleware_layers, build_tracing_config_provider,
+    build_shared_middleware_layers,
 };
 pub use dbt_data_layer::{dbt_data_layer_config, dbt_process_span_attributes};
 pub use dbt_init::init_tracing_with_data_layer;

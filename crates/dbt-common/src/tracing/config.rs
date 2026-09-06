@@ -1,8 +1,6 @@
-use std::{
-    borrow::Cow,
-    path::PathBuf,
-    sync::{Arc, RwLock},
-};
+use std::borrow::Cow;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use super::{
     dbt_init::init_tracing_with_layers,
@@ -15,15 +13,14 @@ use super::{
         query_log::build_query_log_layer_with_background_writer,
         tui_layer::build_tui_layer,
     },
-    middlewares::markdown_log_filter::TelemetryMarkdownLogFilter,
-    middlewares::metric_aggregator::TelemetryMetricAggregator,
-    middlewares::node_warn_outcome::TelemetryNodeWarnOutcome,
-    middlewares::warn_error_options::TelemetryWarnErrorOptionsMiddleware,
-    tracing_feature_handles::TracingConfigProvider,
+    middlewares::{
+        markdown_log_filter::TelemetryMarkdownLogFilter,
+        metric_aggregator::TelemetryMetricAggregator, node_warn_outcome::TelemetryNodeWarnOutcome,
+        warn_error_options::TelemetryWarnErrorOptionsMiddleware,
+    },
+    tracing_feature_handles::{FsTracingConfigProvider, TracingConfigProvider},
 };
-use crate::{
-    collections::HashSet, tracing::tracing_feature_handles::create_tracing_config_provider,
-};
+use crate::collections::HashSet;
 use crate::{
     constants::{
         DBT_DEFAULT_LOG_FILE_BACKUP_COUNT, DBT_DEFAULT_LOG_FILE_MAX_BYTES,
@@ -411,22 +408,19 @@ fn dbt_log_preprocessor_hook(record: &LogRecordInfo) -> Cow<'_, LogRecordInfo> {
 /// Builds the middleware pipeline shared by dbt tracing configurations.
 pub fn build_shared_middleware_layers(
     show_all_deprecations: bool,
-    warn_error_options: WarnErrorOptions,
+    config_provider: Arc<dyn TracingConfigProvider>,
     skip_fusion_only_upgrades: bool,
-) -> (Vec<MiddlewareLayer>, Arc<RwLock<WarnErrorOptions>>) {
-    let (warn_error_options_middleware, warn_error_options) =
-        TelemetryWarnErrorOptionsMiddleware::new(warn_error_options, skip_fusion_only_upgrades);
+) -> Vec<MiddlewareLayer> {
+    let warn_error_options_middleware =
+        TelemetryWarnErrorOptionsMiddleware::new(config_provider, skip_fusion_only_upgrades);
 
-    (
-        vec![
-            Box::new(TelemetryMarkdownLogFilter),
-            Box::new(TelemetryParsingErrorFilter::new(show_all_deprecations)),
-            Box::new(warn_error_options_middleware),
-            Box::new(TelemetryNodeWarnOutcome),
-            Box::new(TelemetryMetricAggregator),
-        ],
-        warn_error_options,
-    )
+    vec![
+        Box::new(TelemetryMarkdownLogFilter),
+        Box::new(TelemetryParsingErrorFilter::new(show_all_deprecations)),
+        Box::new(warn_error_options_middleware),
+        Box::new(TelemetryNodeWarnOutcome),
+        Box::new(TelemetryMetricAggregator),
+    ]
 }
 
 /// Builds a JSONL file consumer with dbt log preprocessing.
@@ -513,18 +507,10 @@ pub fn build_file_log_consumer(
     Ok((Some(consumer), vec![shutdown_item], Some(file_log_path)))
 }
 
-pub fn build_tracing_config_provider(
-    warn_error_options: Arc<RwLock<WarnErrorOptions>>,
-    file_log_path: Option<PathBuf>,
-) -> Box<dyn TracingConfigProvider> {
-    create_tracing_config_provider(warn_error_options, file_log_path)
-}
-
 pub struct FsTraceLayers {
     middleware_layers: Vec<MiddlewareLayer>,
     consumer_layers: Vec<ConsumerLayer>,
     shutdown_items: Vec<TelemetryShutdownItem>,
-    tracing_config_provider: Box<dyn TracingConfigProvider>,
 }
 
 impl FsTraceLayers {
@@ -534,33 +520,35 @@ impl FsTraceLayers {
         Vec<MiddlewareLayer>,
         Vec<ConsumerLayer>,
         Vec<TelemetryShutdownItem>,
-        Box<dyn TracingConfigProvider>,
     ) {
         (
             self.middleware_layers,
             self.consumer_layers,
             self.shutdown_items,
-            self.tracing_config_provider,
         )
     }
 }
 
 impl FsTraceConfig {
+    pub fn create_config_provider(&self) -> Arc<dyn TracingConfigProvider> {
+        Arc::new(FsTracingConfigProvider::from_warn_error_options(
+            self.warn_error_options.clone(),
+        ))
+    }
+
     /// Initializes tracing with the consumers configured for this CLI invocation.
     pub fn init(
         self,
-    ) -> FsResult<(
-        dbt_tracing::init::TelemetryHandle,
-        Box<dyn TracingConfigProvider>,
-    )> {
+        config_provider: Arc<dyn TracingConfigProvider>,
+    ) -> FsResult<dbt_tracing::init::TelemetryHandle> {
         let package = self.package;
         let fallback_trace_id = self.invocation_id.as_u128();
         let fallback_parent_span_id = self.parent_span_id;
         let max_log_verbosity = std::cmp::max(self.max_log_verbosity, self.max_file_log_verbosity);
-        let (middlewares, consumer_layers, shutdown_items, feature_handle) =
-            self.build_layers()?.into_parts();
+        let (middlewares, consumer_layers, shutdown_items) =
+            self.build_layers(config_provider)?.into_parts();
 
-        init_tracing_with_layers(
+        let telemetry_handle = init_tracing_with_layers(
             package,
             fallback_trace_id,
             fallback_parent_span_id,
@@ -568,19 +556,22 @@ impl FsTraceConfig {
             middlewares,
             consumer_layers,
             shutdown_items,
-            feature_handle,
-        )
+        )?;
+        Ok(telemetry_handle)
     }
 
     /// Builds the configured tracing layers and corresponding shutdown items.
     /// This method handles all path creation and file opening as needed.
     /// If no layers are configured, returns an empty layer and no shutdown items.
-    pub fn build_layers(&self) -> FsResult<FsTraceLayers> {
+    pub fn build_layers(
+        &self,
+        config_provider: Arc<dyn TracingConfigProvider>,
+    ) -> FsResult<FsTraceLayers> {
         let mut shutdown_items = Vec::new();
         let mut consumer_layers = Vec::new();
-        let (middleware_layers, warn_error_options) = build_shared_middleware_layers(
+        let middleware_layers = build_shared_middleware_layers(
             self.show_all_deprecations,
-            self.warn_error_options.clone(),
+            Arc::clone(&config_provider),
             self.skip_fusion_only_upgrades,
         );
 
@@ -676,8 +667,7 @@ impl FsTraceConfig {
         }
         shutdown_items.append(&mut file_log_shutdown_items);
 
-        let tracing_config_provider =
-            build_tracing_config_provider(warn_error_options, file_log_path);
+        config_provider.set_file_log_path(file_log_path);
 
         // Create query log writer layer (always enabled; internal-only event sink)
         if self.enable_query_log {
@@ -706,7 +696,6 @@ impl FsTraceConfig {
             middleware_layers,
             consumer_layers,
             shutdown_items,
-            tracing_config_provider,
         })
     }
 }

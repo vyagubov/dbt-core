@@ -57,7 +57,7 @@ pub type CliTracingFactory = fn(
     &Cli,
     &CliParser,
     &mut SystemArgs,
-) -> FsResult<(TelemetryHandle, Box<dyn TracingConfigProvider>)>;
+) -> FsResult<(TelemetryHandle, Arc<dyn TracingConfigProvider>)>;
 
 /// Builds this distribution's feature set from the invocation's tracing feature.
 ///
@@ -153,12 +153,13 @@ fn begin_invocation(
     max_log_verbosity: LevelFilter,
     arg: &mut SystemArgs,
 ) -> PyResult<(InvocationTracingGuard, TracingFeature)> {
-    let (guard, config_provider) = process_tracing(max_log_verbosity)?
-        .begin_invocation(config)
+    let config_provider = config.create_config_provider();
+    let guard = process_tracing(max_log_verbosity)?
+        .begin_invocation(config, Arc::clone(&config_provider))
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     if let Some(log_path) = config_provider.get_file_log_path() {
-        arg.io.log_path = Some(log_path.to_path_buf());
+        arg.io.log_path = Some(log_path);
     }
 
     // No shutdown handle: it would let the engine close the process span, ending tracing for
@@ -459,7 +460,13 @@ where
 
     let init_tracing = match distribution().cli_tracing {
         Some(factory) => factory(&cli, cli_parser, &mut arg),
-        None => trace_config(&cli, cli_parser, &arg).init(),
+        None => {
+            let config = trace_config(&cli, cli_parser, &arg);
+            let config_provider = config.create_config_provider();
+            config
+                .init(Arc::clone(&config_provider))
+                .map(|handle| (handle, config_provider))
+        }
     };
     let (telemetry_handle, tracing_config_provider) = match init_tracing {
         Ok(handle) => handle,
@@ -475,7 +482,7 @@ where
         .with_shutdown_handle(telemetry_handle);
 
     if let Some(resolved_file_log_path) = tracing.config_provider.get_file_log_path() {
-        arg.io.log_path = Some(resolved_file_log_path.to_path_buf());
+        arg.io.log_path = Some(resolved_file_log_path);
     }
 
     let feature_stack = feature_stack_builder(tracing, &cli, &arg);

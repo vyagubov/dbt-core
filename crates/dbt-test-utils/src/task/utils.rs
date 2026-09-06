@@ -425,8 +425,9 @@ where
         .with_warn_error_options(warn_error_options.as_ref().cloned().unwrap_or_default())
         .with_skip_fusion_only_upgrades(cli.common_args.skip_fusion_only_upgrades())
         .build();
-    let (middlewares, consumer_layers, mut shutdown_items, feature_handle) =
-        match trace_config.build_layers() {
+    let tracing_config_provider = trace_config.create_config_provider();
+    let (middlewares, consumer_layers, mut shutdown_items) =
+        match trace_config.build_layers(Arc::clone(&tracing_config_provider)) {
             Ok(layers) => layers.into_parts(),
             Err(err) => {
                 return Box::pin(async move { Err(err) });
@@ -435,7 +436,7 @@ where
 
     tracing_handle.with_tracing_consumer(middlewares, consumer_layers);
 
-    let feature_stack = feature_stack_factory(feature_handle);
+    let feature_stack = feature_stack_factory(tracing_config_provider);
     let cst = feature_stack.cli.cancellation_token_source.clone();
     let fail_fast = feature_stack.cli.fail_fast.clone();
     let token = cst.token();
